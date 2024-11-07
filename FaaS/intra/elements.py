@@ -209,13 +209,14 @@ class _FaaSAdjuster:
         self.last_epb = torch.tensor(0.0)
         self.now_step = 0
         self.now_trigger = 0
+        self.bs_upper = 256
+        self.new_bs = 0
 
     def associate(self, status: _FaaSStatus, optimizer: torch.optim.Optimizer,
-                  grad_monitor: _FaaSGradMonitor, dataloader: FaaSDataLoader):
+                  grad_monitor: _FaaSGradMonitor):
         self._status = status
         self._optimizer = optimizer
         self._grad_monitor = grad_monitor
-        self._dataloader = dataloader
 
     def clear(self):
         self.last_epb = torch.tensor(0.0)
@@ -234,8 +235,8 @@ class _FaaSAdjuster:
 
         if self.now_step >= self.max_step or self.now_trigger >= self.trigger_step:
             self._grad_monitor.clear()
-            self._dataloader.set_batch_size(self.adjust_bs(self._dataloader.batch_size))
-            self.clear()
+            self.new_bs = self.adjust_bs(self._dataloader.batch_size)
+            self._status.set_break()
 
     def adjust_lr(self):
         if self._status.iter_steps > self.warmup_ept and self._status.iter_steps % self.adjust_interval == 0:

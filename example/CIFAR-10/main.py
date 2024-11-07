@@ -5,7 +5,8 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import argparse
 from models import *
-
+from multiprocessing.connection import Connection
+from multiprocessing import Event
 
 import sys
 import os
@@ -15,36 +16,9 @@ if project_path not in sys.path:
     sys.path.append(project_path)
 
 
-
-
 from FaaS.intra.elements import FaaSDataLoader
 from FaaS.intra.job import IntraOptim
 import FaaS.intra.env as env
-
-
-# 定义参数
-parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--bs', default=256, type=int, help='batch size')
-parser.add_argument('--lr', default=0.0001, type=float, help='learning rate')
-parser.add_argument('--epochs', default=60, type=int, help='number of epochs')
-parser.add_argument('--model', default='ResNet18', type=str, help='model')
-args = parser.parse_args()
-
-
-
-# 数据预处理
-transform_train = transforms.Compose([
-    transforms.RandomCrop(32, padding=4),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-])
-
-transform_test = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-])
-
 
 # 训练函数
 def train(job: IntraOptim, loss_func, epoch):
@@ -54,7 +28,7 @@ def train(job: IntraOptim, loss_func, epoch):
     correct = 0
     total = 0
     job.beg_epoch()
-    for batch_idx, (data, target) in enumerate(train_loader):
+    for batch_idx, (data, target) in enumerate(job.trainloader):
         with job.sync_or_not():
             data, target = data.to(device), target.to(device)
             job.optimizer.zero_grad()
@@ -82,18 +56,40 @@ def test(job: IntraOptim, loss_func):
     correct = 0
     total = 0
     with torch.no_grad():
-        for data, target in test_loader:
+        for data, target in job.testloader:
             data, target = data.to(device), target.to(device)
             output = job.model.module(data)
             test_loss += loss_func(output, target).item() * data.size(0)
             _, predicted = torch.max(output.data, 1)
             total += target.size(0)
             correct += (predicted == target).sum().item()
-        print(f'Test set: Average loss: {test_loss / len(test_loader.dataset):.4f}, Accuracy: {100 * correct / total}%')                       
+        print(f'Test set: Average loss: {test_loss / len(job.testloader.dataset):.4f}, Accuracy: {100 * correct / total}%')                       
+    
+    
+def main(conn: Connection, stop: Event):
+    # 定义参数
+    parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
+    parser.add_argument('--bs', default=256, type=int, help='batch size')
+    parser.add_argument('--lr', default=0.0001, type=float, help='learning rate')
+    parser.add_argument('--epochs', default=60, type=int, help='number of epochs')
+    parser.add_argument('--model', default='ResNet18', type=str, help='model')
+    args = parser.parse_args()
 
 
 
-if __name__ == '__main__':
+    # 数据预处理
+    transform_train = transforms.Compose([
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ])
+
+    transform_test = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ])
+
     # 设备配置
     device = env.rank()
     

@@ -1,4 +1,3 @@
-import socket
 import threading
 from typing import List, Dict
 
@@ -6,7 +5,7 @@ from .ipc import ServerIPC, Server
 
 
 class Alloc:
-    class Job_card:
+    class JobCard:
         def __init__(self, id: int, monitor: threading.Thread):
             self._id = id
             self._monitor = monitor
@@ -14,7 +13,7 @@ class Alloc:
             self._shortage = 0
 
     def __init__(self, gpu_id: List[int]):
-        self._job_cards: Dict[int, Alloc.Job_card] = {}
+        self._job_cards: Dict[int, Alloc.JobCard] = {}
         self._cnt = 0
         self._lock = threading.Lock()
         self._server = Server()
@@ -36,7 +35,7 @@ class Alloc:
                 id = self._cnt
                 self._cnt += 1
                 job_monitor_thread = threading.Thread(target=self.monitor_job, args=(id, job_ipc,))
-                self._job_cards[id] = Alloc.Job_card(id, job_monitor_thread)
+                self._job_cards[id] = Alloc.JobCard(id, job_monitor_thread)
             job_monitor_thread.start()
 
     def monitor_job(self, id: int, job_ipc: ServerIPC):
