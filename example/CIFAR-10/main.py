@@ -5,16 +5,11 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import argparse
 from models import *
-from multiprocessing.connection import Connection
-from multiprocessing import Event
+import torch.distributed as dist
 
-import sys
 import os
-
-project_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-if project_path not in sys.path:
-    sys.path.append(project_path)
-
+os.environ['MASTER_ADDR'] = 'localhost'
+os.environ['MASTER_PORT'] = '5678'
 
 from FaaS.intra.elements import FaaSDataLoader
 from FaaS.intra.job import IntraOptim
@@ -66,51 +61,55 @@ def test(job: IntraOptim, loss_func):
         print(f'Test set: Average loss: {test_loss / len(job.testloader.dataset):.4f}, Accuracy: {100 * correct / total}%')                       
     
     
-def main(conn: Connection, stop: Event):
-    # 定义参数
-    parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-    parser.add_argument('--bs', default=256, type=int, help='batch size')
-    parser.add_argument('--lr', default=0.0001, type=float, help='learning rate')
-    parser.add_argument('--epochs', default=60, type=int, help='number of epochs')
-    parser.add_argument('--model', default='ResNet18', type=str, help='model')
-    args = parser.parse_args()
+def main(rank, share, request_event, response_event):
+    try:
 
+        # 定义参数
+        parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
+        parser.add_argument('--bs', default=256, type=int, help='batch size')
+        parser.add_argument('--lr', default=0.0001, type=float, help='learning rate')
+        parser.add_argument('--epochs', default=60, type=int, help='number of epochs')
+        parser.add_argument('--model', default='ResNet18', type=str, help='model')
+        args = parser.parse_args()
+        
+        # 数据预处理
+        transform_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
 
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
 
-    # 数据预处理
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    ])
+        # 设备配置
+        device = env.rank()
+        
+        # 数据加载
+        trainset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
+        train_loader = FaaSDataLoader(trainset, batch_size=args.bs, shuffle=True, num_workers=2)
 
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-    ])
+        testset = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test)
+        test_loader = DataLoader(testset, batch_size=100, shuffle=False, num_workers=2)
 
-    # 设备配置
-    device = env.rank()
-    
-    # 数据加载
-    trainset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
-    train_loader = FaaSDataLoader(trainset, batch_size=args.bs, shuffle=True, num_workers=2)
+        # 模型定义，这里以 ResNet18 为例
+        model = eval(args.model)()
+        model = model.to(device)
 
-    testset = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test)
-    test_loader = DataLoader(testset, batch_size=100, shuffle=False, num_workers=2)
+        # 损失函数和优化器
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
 
-    # 模型定义，这里以 ResNet18 为例
-    model = eval(args.model)()
-    model = model.to(device)
+        job_optim = IntraOptim(model, train_loader, test_loader, optimizer, 1, share, request_event, response_event)
 
-    # 损失函数和优化器
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
-
-    job_optim = IntraOptim(model, train_loader, test_loader, optimizer, 1)
-
-    # 训练和测试循环
-    for epoch in range(1, args.epochs + 1):   
-        train(job_optim, criterion, epoch)
-        test(job_optim, criterion)
+        # 训练和测试循环
+        for epoch in range(1, args.epochs + 1):   
+            train(job_optim, criterion, epoch)
+            test(job_optim, criterion)
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()

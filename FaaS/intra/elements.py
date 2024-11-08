@@ -98,7 +98,6 @@ class FaaSDataLoader:
             self._sampler = DistributedSampler(self._dataset, num_replicas=env.world_size(), rank=env.rank(), shuffle=self._shuffle)
             self._dataloader = DataLoader(self._dataset, batch_size=new_batch_size, sampler=self._sampler,
                                           num_workers=self._num_workers, **self._kwargs)
-        self._status.set_break()
 
 
 class _FaaSGradMonitor:
@@ -190,7 +189,6 @@ class _FaaSAdjuster:
         self._optimizer: torch.optim.Optimizer = None
         self._grad_monitor: _FaaSGradMonitor = None
         self._status: _FaaSStatus = None
-        self._dataloader: FaaSDataLoader = None
 
         # config of ept
         self.warmup_ept = 30
@@ -209,8 +207,8 @@ class _FaaSAdjuster:
         self.last_epb = torch.tensor(0.0)
         self.now_step = 0
         self.now_trigger = 0
-        self.bs_upper = 256
-        self.new_bs = 0
+        self.bs_upper = 200
+        self.new_bs_ratio = 0.0
 
     def associate(self, status: _FaaSStatus, optimizer: torch.optim.Optimizer,
                   grad_monitor: _FaaSGradMonitor):
@@ -234,8 +232,7 @@ class _FaaSAdjuster:
             self.now_trigger = 0
 
         if self.now_step >= self.max_step or self.now_trigger >= self.trigger_step:
-            self._grad_monitor.clear()
-            self.new_bs = self.adjust_bs(self._dataloader.batch_size)
+            self.new_bs_ratio = self.adjust_bs()
             self._status.set_break()
 
     def adjust_lr(self):
@@ -247,13 +244,13 @@ class _FaaSAdjuster:
             for param_group in self._optimizer.param_groups:
                 param_group['lr'] *= rate
 
-    def adjust_bs(self, bs: int) -> int:
+    def adjust_bs(self) -> float:
         if self.lower_bound <= self.epb <= self.upper_bound:
-            return bs
+            return 1.0
         elif self.epb < self.lower_bound:
-            return int(0.5 * bs * self.epb)
+            return 0.5 * self.epb
         else:
-            return int(bs * (1 + self.epb - self.upper_bound))
+            return 1 + self.epb - self.upper_bound
 
 
 class _FaaSOptimizer:

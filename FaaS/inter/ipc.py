@@ -4,15 +4,17 @@ from typing import Any, Tuple
 
 
 class ServerIPC:
-    def __init__(self, conn: socket.socket, ip: socket._RetAddress):
+    def __init__(self, conn: socket.socket, ip):
         self._conn = conn
         self._ip = ip
 
     def send(self, cmd: str, data: Any):
+        print("send", cmd, data)
         self._conn.send(json.dumps({'cmd': cmd, 'data': data}).encode())
 
     def recv(self) -> Tuple[str, Any]:
         request = self._conn.recv(1024)
+        print("recv", request)
         received_data = json.loads(request.decode())
         return received_data['cmd'], received_data['data']
 

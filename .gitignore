@@ -162,3 +162,4 @@ cython_debug/
 #.idea/
 
 .idea
+example/CIFAR-10/data
