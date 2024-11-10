@@ -1,93 +1,73 @@
 import threading
 from typing import List, Dict
 
-from .ipc import ServerIPC, Server
+
+class GPU:
+    def __init__(self, node_ip: str, device_id: int):
+        self.node_ip = node_ip
+        self.device_id = device_id
+        self.available = True
+
+    def __repr__(self):
+        return f"{self.node_ip}:{self.device_id}"
 
 
-class Alloc:
-    class JobCard:
-        def __init__(self, id: int, monitor: threading.Thread):
-            self._id = id
-            self._monitor = monitor
-            self._gpu_list = []
-            self._shortage = 0
+class Node:
+    def __init__(self, node_ip: str):
+        self.node_ip = node_ip
+        self.device_list: Dict[int, GPU] = {}
+        self.available = 0
 
-    def __init__(self, gpu_id: List[int]):
-        self._job_cards: Dict[int, Alloc.JobCard] = {}
-        self._cnt = 0
+    def set_device(self, device_id: List[int]):
+        for gpu_id in device_id:
+            if gpu_id not in self.device_list:
+                self.device_list[gpu_id] = GPU(self.node_ip, gpu_id)
+                self.available += 1
+
+
+class Allocator:
+    def __init__(self):
+        self._gpus: Dict[str, Node] = {}  # node_ip -> Node
+        self._jobs_occupy: Dict[int, List[GPU]] = {}
         self._lock = threading.Lock()
-        self._server = Server()
-        self._adjust_signal = threading.Event()
-        self._gpu_available = {id: True for id in gpu_id}
 
-    def run(self):
-        self._server.serve()
-        while True:
-            job_ipc = self._server.accept()
-            gpu_id = self.request_one()
-            if gpu_id == -1:
-                job_ipc.send('alloc-to', [])
-                job_ipc.close()  # TODO: adjust other to accumulate
-                continue
-            else:
-                job_ipc.send('alloc-to', [gpu_id])
-            with self._lock:
-                id = self._cnt
-                self._cnt += 1
-                job_monitor_thread = threading.Thread(target=self.monitor_job, args=(id, job_ipc,))
-                self._job_cards[id] = Alloc.JobCard(id, job_monitor_thread)
-            job_monitor_thread.start()
+    def set_device(self, node_ip: str, device_id: List[int]):
+        if node_ip not in self._gpus:
+            self._gpus[node_ip] = Node(node_ip)
+        self._gpus[node_ip].set_device(device_id)
 
-    def monitor_job(self, id: int, job_ipc: ServerIPC):
-        while True:
-            if self._adjust_signal.is_set():
-                pass  # TODO:adjust global epb bound
-
-            cmd, data = job_ipc.recv()
-            if cmd == 'alloc-from':
-                result = self.request_resource(id, int(data))
-                job_ipc.send('alloc-to', result)
-            elif cmd == 'end-from':
-                self.release_resource(id)
-                job_ipc.close()
-
-    def request_one(self) -> int:
+    def alloca(self, job_id: int, num: int) -> List[str]:
         with self._lock:
-            for gpu_id in list(self._gpu_available.keys()):
-                if self._gpu_available[gpu_id]:
-                    return gpu_id
-        return -1
+            if job_id in self._jobs_occupy:
+                for gpu in self._jobs_occupy[job_id]:  # Temporary release occupied gpus
+                    self._gpus[gpu.node_ip].available += 1
+                    gpu.available = True
+            sorted_nodes = sorted(self._gpus.values(), key=lambda node: node.available, reverse=True)
+            alloca_list = []
+            for i in range(1, len(sorted_nodes) + 1):
+                max_n = sum(sorted_nodes[j].available for j in range(i))
+                if max_n >= num:
+                    for node in sorted_nodes:
+                        for gpu in node.device_list.values():
+                            if gpu.available:
+                                gpu.available = False
+                                node.available -= 1
+                                alloca_list.append(gpu)
+                            else:
+                                continue
+                            if len(alloca_list) == num:
+                                self._jobs_occupy[job_id] = alloca_list
+                                result = [repr(gpu) for gpu in alloca_list]
+                                return result
+            if job_id in self._jobs_occupy:
+                for gpu in self._jobs_occupy[job_id]:  # Restore the occupied gpus since allocation is failed
+                    self._gpus[gpu.node_ip].available -= 1
+                    gpu.available = False
+            return []
 
-    def request_resource(self, id: int, num: int) -> List[int]:
+    def free(self, job_id: int):
         with self._lock:
-            if len(self._job_cards[id]._gpu_list) > num:
-                new_gpu_list = self._job_cards[id]._gpu_list[:num]
-                for gpu_id in list(self._gpu_available.keys()):
-                    if gpu_id not in new_gpu_list:
-                        self._gpu_available[gpu_id] = True
-                self._job_cards[id]._gpu_list = new_gpu_list
-                self._job_cards[id]._shortage = 0
-                return self._job_cards[id]._gpu_list
-            else:
-                cnt = num - len(self._job_cards[id]._gpu_list)
-                select = []
-                for gpu_id in list(self._gpu_available.keys()):
-                    if self._gpu_available[gpu_id]:
-                        select.append(gpu_id)
-                        cnt -= 1
-                    if cnt == 0:
-                        break
-                if cnt > 0:
-                    self._job_cards[id]._shortage += 1
-                    return []
-                else:
-                    for gpu_id in select:
-                        self._job_cards[id]._gpu_list.append(gpu_id)
-                        self._gpu_available[gpu_id] = False
-                    return self._job_cards[id]._gpu_list
-
-    def release_resource(self, id: int):
-        with self._lock:
-            for gpu_id in self._job_cards[id]._gpu_list:
-                self._gpu_available[gpu_id] = True
-            self._job_cards.pop(id)
+            for gpu in self._jobs_occupy[job_id]:
+                self._gpus[gpu.node_ip].available += 1
+                gpu.available = True
+            self._jobs_occupy.pop(job_id)

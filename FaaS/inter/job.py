@@ -1,49 +1,71 @@
-import os
-from multiprocessing import Manager
+import subprocess
+from typing import List
 
-from typing import Callable, Any
-
-import torch.multiprocessing as mp
-from torch.multiprocessing.spawn import ProcessContext
-
-from .ipc import ClientIPC
+from .ipc import ClientIPC, Server, get_free_port, get_ip
 
 
 class Job:
     def __init__(self):
         self._ipc = ClientIPC()
-        self._request_event = Manager().Event()
-        self._response_event = Manager().Event()
-        self._share = Manager().Value('i', 0)
-        self._process: ProcessContext = None
+        self._server = Server(get_free_port("localhost"))
+        self._process_list: List[subprocess.Popen] = []
 
-    def run(self, func: Callable[..., Any], args: Any):
-        self._ipc.connect('localhost', 12345)
+    def run(self, sched_ip: str, sched_port: int, script_path: str, args: List[str]):
+        self._ipc.connect(sched_ip, sched_port)
         cmd, gpu_list = self._ipc.recv()
         assert cmd == 'alloc-to'
         if len(gpu_list) == 0:
             raise RuntimeError()
+        self._server.serve()
         while True:
-            os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(map(str, gpu_list))
-            self._process = mp.spawn(fn=func, args=args + (self._share, self._request_event, self._response_event,),
-                                     nprocs=len(gpu_list), join=False)
+            parsed_list = {}
+            for entry in gpu_list:
+                ip, gpu_id = entry.split(':')
+                if ip in parsed_list:
+                    parsed_list[ip].append(gpu_id)
+                else:
+                    parsed_list[ip] = [gpu_id]
+            parsed_gpu_list = [(ip, ','.join(ids)) for ip, ids in parsed_list.items()]
+            master_port = get_free_port(parsed_gpu_list[0][0])
+            proxy_ip = get_ip()
+            for index, (ip, gpus) in enumerate(parsed_gpu_list):
+                job_cmd = ["ssh", f"{ip}",
+                           f"CUDA_VISIBLE_DEVICES={gpus}",
+                           "torchrun", script_path,
+                           f"--nproc_per_node={len(gpus)}",
+                           f"--nnodes={len(parsed_gpu_list)}",
+                           f"--node_rank={index}",
+                           f"--master_addr={parsed_gpu_list[0][0]}",
+                           f"--master_port={master_port}",
+                           f"--proxy_ip={proxy_ip}",
+                           f"--proxy_port={self._server.get_port()}"
+                           ] + args
+                self._process_list.append(subprocess.Popen(
+                    job_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True))
+            server_ipc = self._server.accept()  # accept conn from rank0
             while True:
-                self._request_event.wait()
-                info = self._share.value
-                self._request_event.clear()
-                if info == -1:  # training process has ended
-                    self._process.join()
+                cmd, data = server_ipc.recv()
+                if cmd == 'end':
+                    for process in self._process_list:
+                        stdout, stderr = process.communicate()
+                        if process.returncode != 0:
+                            print(stderr)
+                    self._server.close()
+                    server_ipc.close()
+                    self._ipc.send('end', '')
+                    self._ipc.close()
                     return
-                elif info > 0:
-                    self._ipc.send('alloc-from', info)
-                    cmd, new_gpu_list = self._ipc.recv()
-                    assert cmd == 'alloc-to'
-                    if len(new_gpu_list) == 0:
-                        self._share.value = -1  # Request was rejected, accumulate bs on worker
-                        self._response_event.set()
-                    else:
-                        self._share.value = 1  # Request was agreed, save checkpoint
-                        self._response_event.set()
-                        self._process.join()
+                elif cmd == 'alloc':
+                    gpu_num = int(data)
+                    self._ipc.send('alloc', gpu_num)
+                    cmd_response, new_gpu_list = self._ipc.recv()
+                    assert cmd_response == 'alloc'
+                    server_ipc.send('alloc', len(new_gpu_list))
+                    if len(new_gpu_list) > 0:  # save checkpoint and restart
+                        for process in self._process_list:
+                            stdout, stderr = process.communicate()
+                            if process.returncode != 0:
+                                print(stderr)
+                        server_ipc.close()
                         gpu_list = new_gpu_list
                         break

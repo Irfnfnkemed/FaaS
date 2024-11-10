@@ -1,6 +1,7 @@
 from contextlib import nullcontext
 
 import torch
+import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
@@ -72,7 +73,7 @@ class _FaaSStatus:
 class FaaSDataLoader:
     def __init__(self, dataset: Dataset, batch_size=1, shuffle=False, num_workers=0, **kwargs):
         self._dataset = dataset
-        self._batch_size = batch_size
+        self.batch_size = batch_size
         self._shuffle = shuffle
         self._num_workers = num_workers
         self._kwargs = kwargs
@@ -93,8 +94,8 @@ class FaaSDataLoader:
         self._status = status
 
     def set_batch_size(self, new_batch_size):
-        if new_batch_size != self._batch_size:
-            self._batch_size = new_batch_size
+        if new_batch_size != self.batch_size:
+            self.batch_size = new_batch_size
             self._sampler = DistributedSampler(self._dataset, num_replicas=env.world_size(), rank=env.rank(), shuffle=self._shuffle)
             self._dataloader = DataLoader(self._dataset, batch_size=new_batch_size, sampler=self._sampler,
                                           num_workers=self._num_workers, **self._kwargs)
@@ -181,6 +182,12 @@ class _FaaSGradMonitor:
         sub_variance = torch.tensor([chunk.sum() for chunk in sub_variance])
         return self.iter_steps / torch.mean(sub_mean / (sub_variance + 1e-30))
 
+    @property
+    def allreduce_epb(self) -> torch.Tensor:  # All-Reduce to get global-epb
+        dist.all_reduce(self.mean, op=dist.ReduceOp.SUM)
+        dist.all_reduce(self.variance, op=dist.ReduceOp.SUM)
+        return self.epb * env.world_size()
+
 
 class _FaaSAdjuster:
 
@@ -208,7 +215,6 @@ class _FaaSAdjuster:
         self.now_step = 0
         self.now_trigger = 0
         self.bs_upper = 200
-        self.new_bs_ratio = 0.0
 
     def associate(self, status: _FaaSStatus, optimizer: torch.optim.Optimizer,
                   grad_monitor: _FaaSGradMonitor):
@@ -232,7 +238,6 @@ class _FaaSAdjuster:
             self.now_trigger = 0
 
         if self.now_step >= self.max_step or self.now_trigger >= self.trigger_step:
-            self.new_bs_ratio = self.adjust_bs()
             self._status.set_break()
 
     def adjust_lr(self):
@@ -244,13 +249,13 @@ class _FaaSAdjuster:
             for param_group in self._optimizer.param_groups:
                 param_group['lr'] *= rate
 
-    def adjust_bs(self) -> float:
-        if self.lower_bound <= self.epb <= self.upper_bound:
-            return 1.0
-        elif self.epb < self.lower_bound:
-            return 0.5 * self.epb
+    def adjust_bs(self, epb: float, bs: int) -> int:
+        if self.lower_bound <= epb <= self.upper_bound:
+            return bs
+        elif epb < self.lower_bound:
+            return int(0.5 * epb * bs)
         else:
-            return 1 + self.epb - self.upper_bound
+            return int((1 + epb - self.upper_bound) * bs)
 
 
 class _FaaSOptimizer:

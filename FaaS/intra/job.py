@@ -8,12 +8,13 @@ from torch.utils.data import DataLoader
 
 from .elements import _FaaSStatus, _FaaSOptimizer, _FaaSAdjuster, _FaaSGradMonitor, FaaSDataLoader
 from .env import rank, world_size
+from ..inter.ipc import ClientIPC
 
 
 class IntraOptim:
 
     def __init__(self, model: torch.nn.Module, trainloader: FaaSDataLoader, testloader: DataLoader,
-                 optimizer: torch.optim.Optimizer, accumulation_steps: int, share, request_event, response_event):
+                 optimizer: torch.optim.Optimizer, epochs: int, accumulation_steps: int, proxy_ip: str, proxy_port: int):
         if not dist.is_available() or not dist.is_initialized():
             dist.init_process_group(backend='nccl', world_size=world_size(), rank=rank())
         self._status = _FaaSStatus(accumulation_steps)
@@ -23,15 +24,16 @@ class IntraOptim:
         self._adjuster = _FaaSAdjuster()
         self.trainloader = trainloader
         self.testloader = testloader
-        self._share = share
-        self._request_event = request_event
-        self._response_event = response_event
-        self.epochs_now = 0
+        self._ipc = ClientIPC()
+        self._epochs = epochs
+        self._epochs_now = 0
         self._status.associate(self._model)
         self._optimizer.associate(self._status, self._adjuster, self._grad_monitor)
         self._adjuster.associate(self._status, self._optimizer, self._grad_monitor)
         self._grad_monitor.associate(self._status)
         self.trainloader.associate(self._status)
+        if rank() == 0:
+            self._ipc.connect(proxy_ip, proxy_port)
 
     @property
     def model(self):
@@ -49,40 +51,52 @@ class IntraOptim:
         return self._status.sync_or_not
 
     def beg_epoch(self):
+        if self._epochs_now >= self._epochs:
+            self.exit()
+            return
         if self._status.adapt_bs:
-            new_bs = int(self._adjuster.new_bs_ratio * self.trainloader._batch_size * world_size())  # global new bs
-            new_world = math.ceil(new_bs / self._adjuster.bs_upper)
-            dist.barrier()
-            if new_world != world_size():
+            epb = self._grad_monitor.allreduce_epb
+            new_bs = self._adjuster.adjust_bs(epb, self.trainloader.batch_size * world_size())  # global new bs
+            new_world_size = math.ceil(new_bs / self._adjuster.bs_upper)
+            if new_world_size != world_size():
+                alloc_result = torch.tensor(0)
                 if rank() == 0:
-                    self._share.value = new_world
-                    self._request_event.set()
-                self._response_event.wait()
-                info = self._share.value
-                if rank() == 0:
-                    self._response_event.clear()
-                assert info == -1 or info == 1
-                if info == -1:  # Request was rejected, accumulate bs on worker
-                    local_bs = int(new_bs / world_size())
-                    accumulation_steps = math.ceil(local_bs / self._adjuster.bs_upper)
-                    local_bs = int(local_bs / accumulation_steps)
+                    self._ipc.send("alloc", new_world_size)
+                    cmd, data = self._ipc.recv()
+                    assert cmd == 'alloc'
+                    alloc_result = torch.tensor(int(data))
+                dist.broadcast(alloc_result, src=0)
+                if int(alloc_result.item()) == 0:  # Request was rejected, accumulate bs on worker
+                    accumulation_steps = math.ceil(new_bs / world_size() / self._adjuster.bs_upper)
+                    local_bs = int(new_bs / world_size() / accumulation_steps)
                     self.trainloader.set_batch_size(local_bs)
                     self._status.accumulation_steps = accumulation_steps
                 else:  # Request was agreed, save checkpoint
                     if rank() == 0:
                         pass  # TODO: save checkpoint
-                    dist.barrier()
+                    dist.barrier()  # Ensure exiting after checkpoint was saved
                     self.exit()
+                    return
+            else:  # Directly adjust bs and accumulation-steps
+                accumulation_steps = math.ceil(new_bs / world_size() / self._adjuster.bs_upper)
+                local_bs = int(new_bs / world_size() / accumulation_steps)
+                self.trainloader.set_batch_size(local_bs)
+                self._status.accumulation_steps = accumulation_steps
             self._status.set_adapt_lr()
             self._adjuster.clear()
             self._grad_monitor.clear()
-            self.epochs_now += 1
+            self._epochs_now += 1
         elif self._status.adapt_lr:
             self._status.set_adapt_bs()
             self._adjuster.clear()
             self._grad_monitor.clear()
 
+    def get_epoch(self) -> int:
+        return self._epochs_now
+
     def exit(self):
+        self._ipc.send('end', '')
+        self._ipc.close()
         dist.destroy_process_group()
         torch.cuda.empty_cache()
         sys.exit(0)
