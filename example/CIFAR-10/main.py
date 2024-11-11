@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 
 import torch
 import torch.nn as nn
@@ -9,19 +10,25 @@ from torchvision import datasets, transforms
 
 from models import *
 
+project_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if project_path not in sys.path:
+    sys.path.append(project_path)
+
+
 from FaaS.intra.elements import FaaSDataLoader
 from FaaS.intra.job import IntraOptim
 import FaaS.intra.env as env
 
 
 # 训练函数
-def train(job: IntraOptim, loss_func, epoch):
+def train(job: IntraOptim, loss_func):
     job.model.train()
-    device = env.rank()
+    device = env.local_rank()
     running_loss = 0.0
     correct = 0
     total = 0
     job.beg_epoch()
+    epoch = job.get_epoch()
     for batch_idx, (data, target) in enumerate(job.trainloader):
         with job.sync_or_not():
             data, target = data.to(device), target.to(device)
@@ -45,7 +52,7 @@ def train(job: IntraOptim, loss_func, epoch):
 # 测试函数
 def test(job: IntraOptim, loss_func):
     job.model.eval()
-    device = env.rank()
+    device = env.local_rank()
     test_loss = 0
     correct = 0
     total = 0
@@ -85,7 +92,7 @@ def main():
     ])
 
     # 设备配置
-    device = env.rank()
+    device = env.local_rank()
 
     # 数据加载
     trainset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
@@ -101,11 +108,13 @@ def main():
     # 损失函数和优化器
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
-
     job_optim = IntraOptim(model, train_loader, test_loader, optimizer,
                            args.epochs, 1, args.proxy_ip, args.proxy_port)
 
     # 训练和测试循环
-    for epoch in range(1, args.epochs + 10):
-        train(job_optim, criterion, epoch)
+    for epoch in range(1, 2 * args.epochs + 1):
+        train(job_optim, criterion)
         test(job_optim, criterion)
+
+if __name__ == '__main__':
+    main()
