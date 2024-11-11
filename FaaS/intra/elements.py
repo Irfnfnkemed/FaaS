@@ -34,7 +34,7 @@ class _FaaSStatus:
 
     @property
     def sync_or_not(self):
-        return self._model.no_sync() if self.is_update_step else nullcontext
+        return self._model.no_sync() if self.is_update_step else nullcontext()
 
     @property
     def is_accumulation(self) -> bool:

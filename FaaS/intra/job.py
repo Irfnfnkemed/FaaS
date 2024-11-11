@@ -7,7 +7,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
 from .elements import _FaaSStatus, _FaaSOptimizer, _FaaSAdjuster, _FaaSGradMonitor, FaaSDataLoader
-from .env import rank, world_size
+from .env import rank, world_size, local_rank
 from ..inter.ipc import ClientIPC
 
 
@@ -54,23 +54,25 @@ class IntraOptim:
         if self._epochs_now >= self._epochs:
             self.exit()
             return
+        # print(f"LR{rank()},{self._optimizer.param_groups[0]['lr']}")
         if self._status.adapt_bs:
             epb = self._grad_monitor.allreduce_epb
             new_bs = self._adjuster.adjust_bs(epb, self.trainloader.batch_size * world_size())  # global new bs
             new_world_size = math.ceil(new_bs / self._adjuster.bs_upper)
             if new_world_size != world_size():
-                alloc_result = torch.tensor(0)
+                alloc_result = torch.tensor(0).to(local_rank())
                 if rank() == 0:
                     self._ipc.send("alloc", new_world_size)
                     cmd, data = self._ipc.recv()
                     assert cmd == 'alloc'
-                    alloc_result = torch.tensor(int(data))
+                    alloc_result = torch.tensor(int(data)).to(local_rank())
                 dist.broadcast(alloc_result, src=0)
                 if int(alloc_result.item()) == 0:  # Request was rejected, accumulate bs on worker
                     accumulation_steps = math.ceil(new_bs / world_size() / self._adjuster.bs_upper)
                     local_bs = int(new_bs / world_size() / accumulation_steps)
                     self.trainloader.set_batch_size(local_bs)
                     self._status.accumulation_steps = accumulation_steps
+                    # print(f"Adjust{rank()},{local_bs},{accumulation_steps}")
                 else:  # Request was agreed, save checkpoint
                     if rank() == 0:
                         pass  # TODO: save checkpoint
@@ -82,6 +84,7 @@ class IntraOptim:
                 local_bs = int(new_bs / world_size() / accumulation_steps)
                 self.trainloader.set_batch_size(local_bs)
                 self._status.accumulation_steps = accumulation_steps
+                # print(f"Adjust{rank()},{local_bs},{accumulation_steps}")
             self._status.set_adapt_lr()
             self._adjuster.clear()
             self._grad_monitor.clear()
@@ -89,14 +92,17 @@ class IntraOptim:
         elif self._status.adapt_lr:
             self._status.set_adapt_bs()
             self._adjuster.clear()
+            # print(f"EPT{rank()},{self._grad_monitor.ept}")
             self._grad_monitor.clear()
 
     def get_epoch(self) -> int:
         return self._epochs_now
 
     def exit(self):
-        self._ipc.send('end', '')
-        self._ipc.close()
+        # print("exit", rank())
+        if rank() == 0:
+            self._ipc.send('end', '')
+            self._ipc.close()
         dist.destroy_process_group()
         torch.cuda.empty_cache()
         sys.exit(0)

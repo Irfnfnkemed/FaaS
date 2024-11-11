@@ -2,7 +2,7 @@ import threading
 from typing import List, Dict
 
 from .alloc import Allocator
-from .ipc import ServerIPC, Server
+from .ipc import ServerIPC, Server, get_ip
 
 
 class JobCard:
@@ -19,14 +19,15 @@ class Scheduler:
         self._job_cards: Dict[int, JobCard] = {}
         self._cnt = 0
         self._lock = threading.Lock()
-        self._server = Server(port)
+        self._server = Server()
+        self._server_port = port
         self._adjust_signal = threading.Event()
 
     def set_device(self, node_ip: str, device_id: List[int]):
         self._allocator.set_device(node_ip, device_id)
 
     def run(self):
-        self._server.serve()
+        self._server.serve(get_ip(), self._server_port)
         while True:
             job_ipc = self._server.accept()
             job_id = self.alloc_id()

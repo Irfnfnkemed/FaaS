@@ -15,7 +15,7 @@ def get_ip() -> str:
     return ip
 
 
-def get_free_port(ip: str) -> int:
+def get_free_port(ip: str = '') -> int:
     if ip == "" or ip == '127.0.0.1' or ip == 'localhost':
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -50,12 +50,12 @@ class ServerIPC:
         self._ip = ip
 
     def send(self, cmd: str, data: Any):
-        print("send", cmd, data)
+        # print("send", cmd, data)
         self._conn.send(json.dumps({'cmd': cmd, 'data': data}).encode())
 
     def recv(self) -> Tuple[str, Any]:
         request = self._conn.recv(1024)
-        print("recv", request)
+        # print("recv", request)
         received_data = json.loads(request.decode())
         return received_data['cmd'], received_data['data']
 
@@ -65,12 +65,12 @@ class ServerIPC:
 
 class Server:
 
-    def __init__(self, port: int):
+    def __init__(self):
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._port = port
 
-    def serve(self):
-        self._server.bind(('localhost', self._port))
+    def serve(self, ip: str, port: int):
+        # print(ip, port)
+        self._server.bind((ip, port))
         self._server.listen(5)
 
     def accept(self) -> ServerIPC:
@@ -79,6 +79,9 @@ class Server:
 
     def close(self):
         self._server.close()
+        
+    def get_ip(self) -> str:
+        return self._server.getsockname()[0]
 
     def get_port(self) -> int:
         return self._server.getsockname()[1]
@@ -92,10 +95,12 @@ class ClientIPC:
         self._conn.connect((host, port))
 
     def send(self, cmd: str, data: Any):
+        # print('send', cmd, data)
         self._conn.send(json.dumps({'cmd': cmd, 'data': data}).encode())
 
     def recv(self) -> Tuple[str, Any]:
         request = self._conn.recv(1024)
+        # print('recv', request)
         received_data = json.loads(request.decode())
         return received_data['cmd'], received_data['data']
 
