@@ -1,5 +1,6 @@
 from contextlib import nullcontext
 from typing import Dict
+import math
 
 import torch
 from torch.nn.parallel import DistributedDataParallel
@@ -120,6 +121,8 @@ class _FaaSGradMonitor:
 
         self.mean = torch.tensor(0.0)
         self.variance = torch.tensor(0.0)
+        self.mean_epb = torch.tensor(0.0)
+        self.variance_epb = torch.tensor(0.0)
         self.ept_average = torch.tensor(0.0)
         self.iter_steps = 0
 
@@ -165,13 +168,12 @@ class _FaaSGradMonitor:
             self.mean = self.gamma * self.mean + (1 - self.gamma) * para_grad
             self.variance = self.gamma * self.variance + (1 - self.gamma) * (para_grad ** 2)
         elif self._status.adapt_bs:
-            self.mean = self.mean + para_grad
-            self.variance = self.variance + para_grad ** 2
+            self.mean_epb = self.mean_epb + para_grad
+            self.variance_epb = self.variance_epb + para_grad ** 2
 
     def clear(self):
-        self.mean = torch.tensor(0.0)
-        self.variance = torch.tensor(0.0)
-        self.ept_average = torch.tensor(0.0)
+        self.mean_epb = torch.tensor(0.0)
+        self.variance_epb = torch.tensor(0.0)
         self.iter_steps = 0
 
     @property
@@ -187,9 +189,9 @@ class _FaaSGradMonitor:
     @property
     def epb(self) -> torch.Tensor:
         part_size = min(self.grad_max_dim, self.grad_dim) // self.epb_chunks
-        sub_mean = torch.split(self.mean, part_size)
+        sub_mean = torch.split(self.mean_epb, part_size)
         sub_mean = torch.tensor([(chunk ** 2).sum() for chunk in sub_mean])
-        sub_variance = torch.split(self.variance, part_size)
+        sub_variance = torch.split(self.variance_epb, part_size)
         sub_variance = torch.tensor([chunk.sum() for chunk in sub_variance])
         return self.iter_steps / torch.mean(sub_mean / (sub_variance + 1e-30))
 
@@ -209,6 +211,7 @@ class _FaaSAdjuster:
         self.high_error = 0.05
         self.eta = 3
         self.standard_ept = 1.3
+        self.finish_warmup = False
 
         # config of epb
         self.max_step = 50
@@ -219,7 +222,7 @@ class _FaaSAdjuster:
         self.last_epb = torch.tensor(0.0)
         self.now_step = 0
         self.now_trigger = 0
-        self.bs_upper = 200
+        self.bs_upper = 1024
 
     def associate(self, status: _FaaSStatus, optimizer: torch.optim.Optimizer,
                   grad_monitor: _FaaSGradMonitor):
@@ -246,11 +249,13 @@ class _FaaSAdjuster:
             self._status.set_break()
 
     def adjust_lr(self):
-        if self._status.iter_steps > self.warmup_ept and self._status.iter_steps % self.adjust_interval == 0:
-            rate = 10 ** ((self.standard_ept - self._grad_monitor.ept) / self.eta)
+        if not self.finish_warmup and self._status.iter_steps > self.warmup_ept:
+            self.finish_warmup = True
+        if self.finish_warmup and self._status.iter_steps % self.adjust_interval == 0:
+            rate = (10 ** ((self.standard_ept - self._grad_monitor.ept) / self.eta)).item()
             if self.low_error <= self._grad_monitor.ept - self.standard_ept <= self.high_error or \
-                    torch.isnan(rate) or torch.isinf(rate):
-                rate = 1
+                    math.isnan(rate) or math.isinf(rate):
+                rate = 1.0
             for param_group in self._optimizer.param_groups:
                 param_group['lr'] *= rate
 
@@ -261,6 +266,12 @@ class _FaaSAdjuster:
             return int(0.5 * epb * bs)
         else:
             return int((1 + epb - self.upper_bound) * bs)
+        
+    def adjust_accumulate_step(self, last_accumulate_step, new_accumulate_step):
+        if last_accumulate_step != new_accumulate_step:
+            rate = last_accumulate_step / new_accumulate_step
+            for param_group in self._optimizer.param_groups:
+                param_group['lr'] *= rate
 
 
 class _FaaSOptimizer:

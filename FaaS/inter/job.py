@@ -44,7 +44,7 @@ class Job:
                               f"--proxy_port={self._server.get_port()}"
                           ] + args
                 # print(job_cmd)
-                process = subprocess.Popen(job_cmd, stdout=open('output.log', 'w'), stderr=open('error.log', 'w'), text=True, env=env)
+                process = subprocess.Popen(job_cmd, stdout=open('output.log', 'a'), stderr=open('error.log', 'a'), text=True, env=env)
                 self._process_list.append(process)
             server_ipc = self._server.accept()  # accept conn from rank0
             while True:

@@ -27,6 +27,7 @@ def train(job: IntraOptim, loss_func):
     correct = 0
     total = 0
     job.beg_epoch()
+    job.tiaoshi()
     epoch = job.get_epoch()
     for batch_idx, (data, target) in enumerate(job.trainloader):
         with job.sync_or_not():

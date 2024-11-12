@@ -28,7 +28,7 @@ class IntraOptim:
         self._ipc = ClientIPC()
         self._epochs = epochs
         self._epochs_now = 0
-        self._local_bs = 0
+        self._local_bs = self.trainloader.batch_size
         self._status.associate(self._model)
         self._optimizer.associate(self._status, self._adjuster, self._grad_monitor)
         self._adjuster.associate(self._status, self._optimizer, self._grad_monitor)
@@ -36,6 +36,7 @@ class IntraOptim:
         self.trainloader.associate(self._status)
         if rank() == 0:
             self._ipc.connect(proxy_ip, proxy_port)
+        self.load_checkpoint()
 
     def save_checkpoint(self):
         checkpoint = {
@@ -49,6 +50,7 @@ class IntraOptim:
 
     def load_checkpoint(self):
         if os.path.exists('./checkpoint.pth'):
+            print("Loading from checkpoint")
             checkpoint = torch.load('./checkpoint.pth')
             self._epochs_now = checkpoint['epochs_now']
             self._model.module.load_state_dict(checkpoint['model'])
@@ -71,12 +73,15 @@ class IntraOptim:
 
     def sync_or_not(self):
         return self._status.sync_or_not
+    
+    def tiaoshi(self):
+        print(f"[RANK{rank()}], mode:{self._status._mode}, lr:{self._optimizer.param_groups[0]['lr']}, bs:{self._local_bs}, accu:{self._status.accumulation_steps}")
 
     def beg_epoch(self):
+        print(self._status._mode)
         if self._epochs_now >= self._epochs:
             self.exit()
             return
-        # print(f"LR{rank()},{self._optimizer.param_groups[0]['lr']}")
         if self._status.adapt_bs:
             new_bs = self._adjuster.adjust_bs(self._grad_monitor.epb,
                                               self._local_bs * self._status.accumulation_steps * world_size())  # global new bs
@@ -92,14 +97,15 @@ class IntraOptim:
                 if int(alloc_result.item()) == 0:  # Request was rejected, accumulate bs on worker
                     accumulation_steps = math.ceil(new_bs / world_size() / self._adjuster.bs_upper)
                     self._local_bs = int(new_bs / world_size() / accumulation_steps)
+                    self._adjuster.adjust_accumulate_step(self._status.accumulation_steps, accumulation_steps)
                     self._status.accumulation_steps = accumulation_steps
                 else:  # Request was agreed, save checkpoint
                     if rank() == 0:
                         self._local_bs = int(new_bs / new_world_size)
+                        self._adjuster.adjust_accumulate_step(self._status.accumulation_steps, 1)
                         self._status.accumulation_steps = 1
                         self._status.set_adapt_lr()
                         self.save_checkpoint()
-                        pass  # save checkpoint
                     dist.barrier()  # Ensure exiting after checkpoint was saved
                     self.exit()
                     return
@@ -107,6 +113,7 @@ class IntraOptim:
                 accumulation_steps = math.ceil(new_bs / world_size() / self._adjuster.bs_upper)
                 self._local_bs = int(new_bs / world_size() / accumulation_steps)
                 self.trainloader.set_batch_size(self._local_bs)
+                self._adjuster.adjust_accumulate_step(self._status.accumulation_steps, accumulation_steps)
                 self._status.accumulation_steps = accumulation_steps
                 # print(f"Adjust{rank()},{local_bs},{accumulation_steps}")
             self._status.set_adapt_lr()
