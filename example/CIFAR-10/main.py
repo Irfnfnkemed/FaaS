@@ -14,7 +14,6 @@ project_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if project_path not in sys.path:
     sys.path.append(project_path)
 
-
 from FaaS.intra.elements import FaaSDataLoader
 from FaaS.intra.job import IntraOptim
 import FaaS.intra.env as env
@@ -112,9 +111,10 @@ def main():
                            args.epochs, 1, args.proxy_ip, args.proxy_port)
 
     # 训练和测试循环
-    for epoch in range(1, 2 * args.epochs + 1):
+    while True:
         train(job_optim, criterion)
         test(job_optim, criterion)
+
 
 if __name__ == '__main__':
     main()

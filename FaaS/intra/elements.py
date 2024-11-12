@@ -1,7 +1,7 @@
 from contextlib import nullcontext
+from typing import Dict
 
 import torch
-import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
@@ -16,6 +16,17 @@ class _FaaSStatus:
         self._break = False
         self._mode = 'adapt_lr'
         self._model: DistributedDataParallel = None
+
+    def save_state(self) -> Dict:
+        state = {
+            'accumulation_steps': self.accumulation_steps,
+            'mode': self._mode,
+        }
+        return state
+
+    def load_state(self, state: Dict):
+        self.accumulation_steps = state['accumulation_steps']
+        self._mode = state['mode']
 
     def associate(self, model: DistributedDataParallel):
         self._model = model
@@ -34,7 +45,7 @@ class _FaaSStatus:
 
     @property
     def sync_or_not(self):
-        return self._model.no_sync() if self.is_update_step else nullcontext()
+        return nullcontext() if self.is_update_step else self._model.no_sync()
 
     @property
     def is_accumulation(self) -> bool:
@@ -103,9 +114,9 @@ class FaaSDataLoader:
 
 class _FaaSGradMonitor:
 
-    def __init__(self, model: DistributedDataParallel):
+    def __init__(self):
         self._status: _FaaSStatus = None
-        self._model = model
+        self._model: DistributedDataParallel = None
 
         self.mean = torch.tensor(0.0)
         self.variance = torch.tensor(0.0)
@@ -117,18 +128,18 @@ class _FaaSGradMonitor:
         self.epb_chunks = 100
 
         self.grad_dim = 0
+        self.grad_mask = None
+
+    def associate(self, model: DistributedDataParallel, status: _FaaSStatus):
+        self._model = model
+        self._status = status
+        self.grad_dim = 0
         for param in self._model.parameters():
             self.grad_dim += param.data.numel()
-
-        if self.grad_dim <= self.grad_max_dim:
-            self.grad_mask = None
-        else:
+        if self.grad_dim > self.grad_max_dim:
             self.grad_mask = torch.zeros(self.grad_dim, dtype=torch.bool)
             sample_indices = torch.randint(0, self.grad_dim, (self.grad_max_dim,))
             self.grad_mask[sample_indices] = True
-
-    def associate(self, status: _FaaSStatus):
-        self._status = status
 
     def monitor(self):
         self.iter_steps += 1
@@ -181,12 +192,6 @@ class _FaaSGradMonitor:
         sub_variance = torch.split(self.variance, part_size)
         sub_variance = torch.tensor([chunk.sum() for chunk in sub_variance])
         return self.iter_steps / torch.mean(sub_mean / (sub_variance + 1e-30))
-
-    @property
-    def allreduce_epb(self) -> torch.Tensor:  # All-Reduce to get global-epb
-        dist.all_reduce(self.mean, op=dist.ReduceOp.SUM)
-        dist.all_reduce(self.variance, op=dist.ReduceOp.SUM)
-        return self.epb * env.world_size()
 
 
 class _FaaSAdjuster:
