@@ -42,7 +42,7 @@ class _FaaSStatus:
 
     @property
     def is_update_step(self) -> bool:
-        return self._iter_steps % self.accumulation_steps == 0
+        return self.iter_steps % self.accumulation_steps == 0
 
     @property
     def sync_or_not(self):
@@ -54,7 +54,7 @@ class _FaaSStatus:
 
     @property
     def iter_steps(self) -> int:
-        return self._iter_steps
+        return self._iter_steps + 1
 
     def set_adapt_bs(self):
         self.reset(self.accumulation_steps)
@@ -216,13 +216,14 @@ class _FaaSAdjuster:
         # config of epb
         self.max_step = 50
         self.convergence_ratio = 0.05
-        self.trigger_step = 5
+        self.trigger_step = 3
         self.lower_bound = 2.0
         self.upper_bound = 4.0
         self.last_epb = torch.tensor(0.0)
         self.now_step = 0
         self.now_trigger = 0
-        self.bs_upper = 1024
+        self.bs_upper = 50
+        self.bs_lower = 20
         self.now_lower_bound = 2.0
         self.now_upper_bound = 4.0
 
@@ -300,7 +301,6 @@ class _FaaSOptimizer:
         self._adjuster = adjuster
 
     def step(self):
-        self._status.iter_count()
         if self._status.is_update_step:
             self._grad_monitor.monitor()
             if self._status.adapt_lr:
@@ -308,3 +308,4 @@ class _FaaSOptimizer:
                 self._adjuster.adjust_lr()
             elif self._status.adapt_bs:
                 self._adjuster.set_epb()
+        self._status.iter_count()

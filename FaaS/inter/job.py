@@ -64,12 +64,11 @@ class Job:
                     self._ipc.send('alloc', gpu_num)
                     cmd_response, new_gpu_list = self._ipc.recv()
                     assert cmd_response == 'alloc'
+                    assert len(new_gpu_list) >= len(gpu_list)
                     server_ipc.send('alloc', len(new_gpu_list))
-                    if len(new_gpu_list) > 0:  # save checkpoint and restart
+                    if len(new_gpu_list) > len(gpu_list):  # save checkpoint and restart on more gpus
                         for process in self._process_list:
                             stdout, stderr = process.communicate()
-                            # if process.returncode != 0:
-                            #     print(stderr)
                         server_ipc.close()
                         gpu_list = new_gpu_list
                         break
@@ -78,5 +77,15 @@ class Job:
                     cmd_response, standard = self._ipc.recv()
                     assert cmd_response == 'standard'
                     server_ipc.send('standard', float(standard))
+                elif cmd == 'free':
+                    self._ipc.send('free', int(data))
+                    cmd_response, new_gpu_list = self._ipc.recv()
+                    assert cmd_response == 'free'
+                    assert len(new_gpu_list) == int(data)
+                    for process in self._process_list: # save checkpoint and restart on less gpus
+                        stdout, stderr = process.communicate()
+                    server_ipc.close()
+                    gpu_list = new_gpu_list
+                    break
                 elif cmd == 'ideal':
                     self._ipc.send('ideal', '')

@@ -28,7 +28,7 @@ class IntraOptim:
         self._ipc = ClientIPC()
         self._epochs = epochs
         self._epochs_now = 0
-        self._local_bs = self.trainloader.batch_size
+        self._global_bs = self.trainloader.batch_size * world_size()
         self._status.associate(self._model)
         self._optimizer.associate(self._status, self._adjuster, self._grad_monitor)
         self._adjuster.associate(self._status, self._optimizer, self._grad_monitor)
@@ -44,7 +44,7 @@ class IntraOptim:
             'optimizer': self._optimizer.state_dict(),
             'status': self._status.save_state(),
             'epochs_now': self._epochs_now,
-            'bs': self._local_bs
+            'global_bs': self._global_bs
         }
         torch.save(checkpoint, './checkpoint.pth')
 
@@ -56,8 +56,8 @@ class IntraOptim:
             self._model.module.load_state_dict(checkpoint['model'])
             self._optimizer.load_state_dict(checkpoint['optimizer'])
             self._status.load_state(checkpoint['status'])
-            self.trainloader.set_batch_size(checkpoint['bs'])
-            self._local_bs = checkpoint['bs']
+            self.trainloader.set_batch_size(int(checkpoint['global_bs'] / self._status.accumulation_steps / world_size()))
+            self._global_bs = checkpoint['global_bs']
 
     @property
     def model(self):
@@ -75,14 +75,14 @@ class IntraOptim:
         return self._status.sync_or_not
     
     def tiaoshi(self):
-        print(f"[RANK{rank()}], mode:{self._status._mode}, lr:{self._optimizer.param_groups[0]['lr']}, bs:{self._local_bs}, accu:{self._status.accumulation_steps}")
+        print(f"[RANK{rank()}], mode:{self._status._mode}, lr:{self._optimizer.param_groups[0]['lr']}, global:{self._global_bs}, accu:{self._status.accumulation_steps}, epb_stand:{self._adjuster.now_lower_bound - 1}")
 
     def beg_epoch(self):
         if self._epochs_now >= self._epochs:
             self.exit()
             return
         if self._status.adapt_bs:
-            epb_standard = torch.tensor(0).to(local_rank())
+            epb_standard = torch.tensor(1.0).to(local_rank())
             if rank() == 0:
                 self._ipc.send('standard', '')
                 cmd, standard = self._ipc.recv()
@@ -90,10 +90,16 @@ class IntraOptim:
                 epb_standard = torch.tensor(float(standard)).to(local_rank())
             dist.broadcast(epb_standard, src=0) # get epb-standard
             self._adjuster.set_epb_standard(epb_standard.item())
-            new_bs = self._adjuster.adjust_bs(self._grad_monitor.epb,
-                                              self._local_bs * self._status.accumulation_steps * world_size())  # global new bs
-            new_world_size = math.ceil(new_bs / self._adjuster.bs_upper)
-            if new_world_size != world_size():
+            self._global_bs = self._adjuster.adjust_bs(self._grad_monitor.epb, self._global_bs)  # global new bs
+            if world_size() * self._adjuster.bs_upper >= self._global_bs and world_size() * self._adjuster.bs_lower <= self._global_bs: 
+                # Directly adjust bs without apply new resources
+                if rank() == 0:
+                    self._ipc.send('ideal', '')
+                self.trainloader.set_batch_size(int(self._global_bs / world_size()))
+                self._adjuster.adjust_accumulate_step(self._status.accumulation_steps, 1)
+                self._status.accumulation_steps = 1
+            elif world_size() * self._adjuster.bs_upper < self._global_bs: # Request more resources
+                new_world_size = math.ceil(self._global_bs * 2 / (self._adjuster.bs_upper + self._adjuster.bs_lower))
                 alloc_result = torch.tensor(0).to(local_rank())
                 if rank() == 0: # Request new resource-allocation
                     self._ipc.send('alloc', new_world_size)
@@ -101,29 +107,33 @@ class IntraOptim:
                     assert cmd == 'alloc'
                     alloc_result = torch.tensor(int(data)).to(local_rank())
                 dist.broadcast(alloc_result, src=0)
-                if int(alloc_result.item()) == 0:  # Request was rejected, accumulate bs on worker
-                    accumulation_steps = math.ceil(new_bs / world_size() / self._adjuster.bs_upper)
-                    self._local_bs = int(new_bs / world_size() / accumulation_steps)
+                alloc_result = int(alloc_result.item())
+                if alloc_result == world_size():  # Request was rejected, directly accumulate bs on worker
+                    accumulation_steps = math.ceil(self._global_bs / world_size() / self._adjuster.bs_upper)
+                    self.trainloader.set_batch_size(int(self._global_bs / world_size() / accumulation_steps))
                     self._adjuster.adjust_accumulate_step(self._status.accumulation_steps, accumulation_steps)
                     self._status.accumulation_steps = accumulation_steps
                 else:  # Request was agreed, save checkpoint
                     if rank() == 0:
-                        self._local_bs = int(new_bs / new_world_size)
-                        self._adjuster.adjust_accumulate_step(self._status.accumulation_steps, 1)
-                        self._status.accumulation_steps = 1
+                        accumulation_steps = math.ceil(self._global_bs / alloc_result / self._adjuster.bs_upper)
+                        self._adjuster.adjust_accumulate_step(self._status.accumulation_steps, accumulation_steps)
+                        self._status.accumulation_steps = accumulation_steps
                         self._status.set_adapt_lr()
                         self.save_checkpoint()
                     dist.barrier()  # Ensure exiting after checkpoint was saved
                     self.exit()
                     return
-            else:  # Directly adjust bs and accumulation-steps
-                if rank() == 0:
-                    self._ipc.send('ideal', '')
-                accumulation_steps = math.ceil(new_bs / world_size() / self._adjuster.bs_upper)
-                self._local_bs = int(new_bs / world_size() / accumulation_steps)
-                self.trainloader.set_batch_size(self._local_bs)
-                self._adjuster.adjust_accumulate_step(self._status.accumulation_steps, accumulation_steps)
-                self._status.accumulation_steps = accumulation_steps
+            else: # Free resource  
+                new_world_size = math.ceil(self._global_bs * 2 / (self._adjuster.bs_upper + self._adjuster.bs_lower))      
+                if rank() == 0: # Free rebudang resources
+                    self._ipc.send('free', new_world_size)
+                    self._adjuster.adjust_accumulate_step(self._status.accumulation_steps, 1)
+                    self._status.accumulation_steps = 1
+                    self._status.set_adapt_lr()
+                    self.save_checkpoint()
+                dist.barrier()  # Ensure exiting after checkpoint was saved
+                self.exit()
+                return
             self._status.set_adapt_lr()
             self._adjuster.clear()
             self._grad_monitor.clear()

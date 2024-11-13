@@ -31,6 +31,7 @@ class Scheduler:
     def run(self):
         self._server.serve(get_ip(), self._server_port)
         adjust_standard_thread = threading.Thread(target=self.adjust_standard, args=())
+        adjust_standard_thread.start()
         while True:
             job_ipc = self._server.accept()
             job_id = self.alloc_id()
@@ -52,12 +53,19 @@ class Scheduler:
             if cmd == 'alloc':
                 result = self._allocator.alloca(job_id, int(data))
                 with self._lock:
-                    if len(result) != 0:
-                        self._job_cards[job_id].gpu_num = len(result)
-                        self._job_cards[job_id].shortage = 0
-                    else:
+                    if len(result) < int(data): # Lack of resources
                         self._job_cards[job_id].shortage += 1
+                    else:
+                        self._job_cards[job_id].shortage = 0
+                    self._job_cards[job_id].gpu_num = len(result)    
                 job_ipc.send('alloc', result)
+            elif cmd == 'free':
+                result = self._allocator.alloca(job_id, int(data))
+                assert len(result) == int(data)
+                with self._lock:
+                    self._job_cards[job_id].shortage = 0
+                    self._job_cards[job_id].gpu_num = int(data)
+                job_ipc.send('free', result)
             elif cmd == 'end':
                 self._allocator.free(job_id)
                 job_ipc.close()
@@ -65,10 +73,11 @@ class Scheduler:
                     self._job_cards.pop(job_id)
                 return
             elif cmd == 'standard':
+                standard = 1.0
                 with self._lock:
                     standard = self._epb_standard_rate
                     self._job_cards[job_id].adjust_standard = True
-                    job_ipc.send('standard', standard)
+                job_ipc.send('standard', standard)
             elif cmd == 'ideal':
                 with self._lock:
                     self._job_cards[job_id].shortage = 0
@@ -85,7 +94,7 @@ class Scheduler:
                 busy = 0
                 already_adjust = 0
                 for job_card in self._job_cards.values():
-                    if job_card.shortage >= 3:
+                    if job_card.shortage >= 2:
                         busy += 1
                     if job_card.adjust_standard:
                         already_adjust += 1
@@ -93,10 +102,10 @@ class Scheduler:
                     if busy >= len(self._job_cards) / 2: 
                         for job_card in self._job_cards.values():
                             job_card.adjust_standard = False
-                        self._epb_standard_rate *= 0.9
+                        self._epb_standard_rate = min(1.0, self._epb_standard_rate / 0.9)    
                     elif busy == 0: 
                         for job_card in self._job_cards.values():
                             job_card.adjust_standard = False
-                        self._epb_standard_rate = min(1.0, self._epb_standard_rate / 0.9)
-            time.sleep(50)
+                        self._epb_standard_rate *= 0.9
+            time.sleep(10)
                 
