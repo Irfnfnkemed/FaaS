@@ -78,18 +78,25 @@ class IntraOptim:
         print(f"[RANK{rank()}], mode:{self._status._mode}, lr:{self._optimizer.param_groups[0]['lr']}, bs:{self._local_bs}, accu:{self._status.accumulation_steps}")
 
     def beg_epoch(self):
-        print(self._status._mode)
         if self._epochs_now >= self._epochs:
             self.exit()
             return
         if self._status.adapt_bs:
+            epb_standard = torch.tensor(0).to(local_rank())
+            if rank() == 0:
+                self._ipc.send('standard', '')
+                cmd, standard = self._ipc.recv()
+                assert cmd == 'standard'
+                epb_standard = torch.tensor(float(standard)).to(local_rank())
+            dist.broadcast(epb_standard, src=0) # get epb-standard
+            self._adjuster.set_epb_standard(epb_standard.item())
             new_bs = self._adjuster.adjust_bs(self._grad_monitor.epb,
                                               self._local_bs * self._status.accumulation_steps * world_size())  # global new bs
             new_world_size = math.ceil(new_bs / self._adjuster.bs_upper)
             if new_world_size != world_size():
                 alloc_result = torch.tensor(0).to(local_rank())
-                if rank() == 0:
-                    self._ipc.send("alloc", new_world_size)
+                if rank() == 0: # Request new resource-allocation
+                    self._ipc.send('alloc', new_world_size)
                     cmd, data = self._ipc.recv()
                     assert cmd == 'alloc'
                     alloc_result = torch.tensor(int(data)).to(local_rank())
@@ -110,12 +117,13 @@ class IntraOptim:
                     self.exit()
                     return
             else:  # Directly adjust bs and accumulation-steps
+                if rank() == 0:
+                    self._ipc.send('ideal', '')
                 accumulation_steps = math.ceil(new_bs / world_size() / self._adjuster.bs_upper)
                 self._local_bs = int(new_bs / world_size() / accumulation_steps)
                 self.trainloader.set_batch_size(self._local_bs)
                 self._adjuster.adjust_accumulate_step(self._status.accumulation_steps, accumulation_steps)
                 self._status.accumulation_steps = accumulation_steps
-                # print(f"Adjust{rank()},{local_bs},{accumulation_steps}")
             self._status.set_adapt_lr()
             self._adjuster.clear()
             self._grad_monitor.clear()
@@ -123,14 +131,12 @@ class IntraOptim:
             self._epochs_now += 1
             self._status.set_adapt_bs()
             self._adjuster.clear()
-            # print(f"EPT{rank()},{self._grad_monitor.ept}")
             self._grad_monitor.clear()
 
     def get_epoch(self) -> int:
         return self._epochs_now
 
     def exit(self):
-        # print("exit", rank())
         if rank() == 0:
             self._ipc.send('end', '')
             self._ipc.close()

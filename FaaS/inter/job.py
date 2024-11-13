@@ -73,3 +73,10 @@ class Job:
                         server_ipc.close()
                         gpu_list = new_gpu_list
                         break
+                elif cmd == 'standard':
+                    self._ipc.send('standard', '')
+                    cmd_response, standard = self._ipc.recv()
+                    assert cmd_response == 'standard'
+                    server_ipc.send('standard', float(standard))
+                elif cmd == 'ideal':
+                    self._ipc.send('ideal', '')

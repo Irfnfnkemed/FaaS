@@ -217,12 +217,14 @@ class _FaaSAdjuster:
         self.max_step = 50
         self.convergence_ratio = 0.05
         self.trigger_step = 5
-        self.lower_bound = 2
-        self.upper_bound = 4
+        self.lower_bound = 2.0
+        self.upper_bound = 4.0
         self.last_epb = torch.tensor(0.0)
         self.now_step = 0
         self.now_trigger = 0
         self.bs_upper = 1024
+        self.now_lower_bound = 2.0
+        self.now_upper_bound = 4.0
 
     def associate(self, status: _FaaSStatus, optimizer: torch.optim.Optimizer,
                   grad_monitor: _FaaSGradMonitor):
@@ -260,18 +262,22 @@ class _FaaSAdjuster:
                 param_group['lr'] *= rate
 
     def adjust_bs(self, epb: float, bs: int) -> int:
-        if self.lower_bound <= epb <= self.upper_bound:
+        if self.now_lower_bound <= epb <= self.now_upper_bound:
             return bs
-        elif epb < self.lower_bound:
+        elif epb < self.now_lower_bound:
             return int(0.5 * epb * bs)
         else:
-            return int((1 + epb - self.upper_bound) * bs)
+            return int((1 + epb - self.now_upper_bound) * bs)
         
     def adjust_accumulate_step(self, last_accumulate_step, new_accumulate_step):
         if last_accumulate_step != new_accumulate_step:
             rate = last_accumulate_step / new_accumulate_step
             for param_group in self._optimizer.param_groups:
                 param_group['lr'] *= rate
+    
+    def set_epb_standard(self, standard: float):
+        self.now_lower_bound = 1 + standard * (self.lower_bound - 1)
+        self.now_upper_bound = 1 + standard * (self.upper_bound - 1)
 
 
 class _FaaSOptimizer:
