@@ -11,23 +11,35 @@ from . import env
 
 class _FaaSStatus:
 
-    def __init__(self, accumulation_steps: int):
+    def __init__(self, adapt_bs_interval: int = 1, accumulation_steps: int = 1):
+        self._adapt_bs_interval = adapt_bs_interval
         self.accumulation_steps = accumulation_steps
         self._iter_steps = 0
         self._break = False
         self._mode = 'adapt_lr'
         self._model: DistributedDataParallel = None
+        self._now_state = 0
+        
+    def next_state(self):
+        if self._now_state % self._adapt_bs_interval == 0:
+            self.set_adapt_bs()
+        else:
+            self.set_adapt_lr()
+        self._now_state += 1
+            
 
     def save_state(self) -> Dict:
         state = {
             'accumulation_steps': self.accumulation_steps,
             'mode': self._mode,
+            'now_state': self._now_state,
         }
         return state
 
     def load_state(self, state: Dict):
         self.accumulation_steps = state['accumulation_steps']
         self._mode = state['mode']
+        self._now_state = state['now_state']
 
     def associate(self, model: DistributedDataParallel):
         self._model = model
@@ -214,7 +226,7 @@ class _FaaSAdjuster:
         self.finish_warmup = False
 
         # config of epb
-        self.max_step = 50
+        self.max_step = 30
         self.convergence_ratio = 0.05
         self.trigger_step = 3
         self.lower_bound = 2.0
@@ -223,7 +235,7 @@ class _FaaSAdjuster:
         self.now_step = 0
         self.now_trigger = 0
         self.bs_upper = 200
-        self.bs_lower = 100
+        self.bs_lower = 50
         self.now_lower_bound = 2.0
         self.now_upper_bound = 4.0
 
@@ -268,7 +280,7 @@ class _FaaSAdjuster:
         elif epb < self.now_lower_bound:
             return int(0.5 * epb * bs)
         else:
-            return int((1 + epb - self.now_upper_bound) * bs)
+            return int(5 * torch.tanh(1 + epb - self.now_upper_bound) * bs)
         
     def adjust_accumulate_step(self, last_accumulate_step, new_accumulate_step):
         if last_accumulate_step != new_accumulate_step:

@@ -163,4 +163,7 @@ cython_debug/
 
 .idea
 example/CIFAR-10/data
+example/CIFAR-10/tmp_0
+example/CIFAR-10/tmp_1
+example/NCF/data
 *.pth

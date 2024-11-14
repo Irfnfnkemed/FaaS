@@ -10,6 +10,7 @@ from models import *
 from FaaS.intra.elements import FaaSDataLoader
 from FaaS.intra.job import IntraOptim
 import FaaS.intra.env as env
+import time
 
 
 # 训练函数
@@ -43,21 +44,21 @@ def train(job: IntraOptim, loss_func):
 
 
 # 测试函数
-def test(job: IntraOptim, loss_func):
+def test(job: IntraOptim, loss_func, test_loader):
     job.model.eval()
     device = env.local_rank()
     test_loss = 0
     correct = 0
     total = 0
     with torch.no_grad():
-        for data, target in job.testloader:
+        for data, target in test_loader:
             data, target = data.to(device), target.to(device)
             output = job.model.module(data)
             test_loss += loss_func(output, target).item() * data.size(0)
             _, predicted = torch.max(output.data, 1)
             total += target.size(0)
             correct += (predicted == target).sum().item()
-        print(f'Test set: Average loss: {test_loss / len(job.testloader.dataset):.4f}, Accuracy: {100 * correct / total}%')
+        print(f'Time: {time.time()}, Test set: Average loss: {test_loss / len(test_loader):.4f}, Accuracy: {100 * correct / total}%')
 
 
 def main():
@@ -101,14 +102,14 @@ def main():
     # 损失函数和优化器
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
-    job_optim = IntraOptim(model, train_loader, test_loader, optimizer,
-                           args.epochs, 1, args.proxy_ip, args.proxy_port)
+    
+    job_optim = IntraOptim(model, train_loader, optimizer, args.epochs, 1, args.proxy_ip, args.proxy_port)
 
     # 训练和测试循环
     while True:
         train(job_optim, criterion)
-        test(job_optim, criterion)
+        test(job_optim, criterion, test_loader)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

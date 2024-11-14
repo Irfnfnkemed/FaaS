@@ -110,9 +110,9 @@ class Scheduler:
                 surplus = 0
                 already_adjust = 0
                 for job_card in self._job_cards.values():
-                    if job_card.scarcity >= 2:
+                    if job_card.scarcity >= 1:
                         scarcity += 1
-                    if job_card.surplus >= 2:
+                    if job_card.surplus >= 1:
                         surplus += 1
                     if job_card.adjust_standard:
                         already_adjust += 1
