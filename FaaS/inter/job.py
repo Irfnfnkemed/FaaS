@@ -13,6 +13,12 @@ class Job:
 
     def run(self, sched_ip: str, sched_port: int, script_path: str, args: List[str]):
         self._ipc.connect(sched_ip, sched_port)
+        self._ipc.send('shakehands', '')
+        cmd, job_id = self._ipc.recv()
+        print(f'JOB_ID:{job_id}...')
+        os.makedirs(f'./tmp_{job_id}', exist_ok=True)
+        assert cmd == 'shakehands'
+        self._ipc.send('alloc', 1)
         cmd, gpu_list = self._ipc.recv()
         assert cmd == 'alloc'
         if len(gpu_list) == 0:
@@ -32,6 +38,7 @@ class Job:
                 # print(ip, gpus)
                 env = os.environ.copy()
                 env['CUDA_VISIBLE_DEVICES'] = ','.join(gpus)
+                print(f'Job{job_id} Run on gpu {','.join(gpus)}.')
                 job_cmd = [
                               "torchrun",
                               f"--nproc_per_node={len(gpus)}",
@@ -43,12 +50,13 @@ class Job:
                               f"--proxy_ip={self._server.get_ip()}",
                               f"--proxy_port={self._server.get_port()}"
                           ] + args
-                # print(job_cmd)
-                process = subprocess.Popen(job_cmd, stdout=open('output.log', 'a'), stderr=open('error.log', 'a'), text=True, env=env)
+                process = subprocess.Popen(job_cmd, stdout=open(f'./tmp_{job_id}/output.log', 'a'), stderr=open(f'./tmp_{job_id}/error.log', 'a'), text=True, env=env)
                 self._process_list.append(process)
             server_ipc = self._server.accept()  # accept conn from rank0
             while True:
                 cmd, data = server_ipc.recv()
+                if cmd == 'shakehands':
+                    server_ipc.send('shakehands', int(job_id))
                 if cmd == 'end':
                     for process in self._process_list:
                         stdout, stderr = process.communicate()

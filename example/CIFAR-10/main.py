@@ -1,7 +1,4 @@
 import argparse
-import os
-import sys
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -9,10 +6,6 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 from models import *
-
-project_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-if project_path not in sys.path:
-    sys.path.append(project_path)
 
 from FaaS.intra.elements import FaaSDataLoader
 from FaaS.intra.job import IntraOptim

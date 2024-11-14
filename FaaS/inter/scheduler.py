@@ -11,7 +11,8 @@ class JobCard:
         self.job_id = job_id
         self.monitor = monitor
         self.gpu_num = 0
-        self.shortage = 0
+        self.scarcity = 0
+        self.surplus = 0
         self.adjust_standard = False
 
 
@@ -23,7 +24,11 @@ class Scheduler:
         self._lock = threading.Lock()
         self._server = Server()
         self._server_port = port
-        self._epb_standard_rate = 1.0
+        
+        self._epb_standard = 1.0
+        self._epb_standard_upper = 2.0
+        self._epb_standard_lower = 0.5
+        self._epb_standard_adjust_rate = 0.95
 
     def set_device(self, node_ip: str, device_id: List[int]):
         self._allocator.set_device(node_ip, device_id)
@@ -33,12 +38,18 @@ class Scheduler:
         adjust_standard_thread = threading.Thread(target=self.adjust_standard, args=())
         adjust_standard_thread.start()
         while True:
+
             job_ipc = self._server.accept()
             job_id = self.alloc_id()
-            gpu_list = self._allocator.alloca(job_id, 1)
+            cmd, _ = job_ipc.recv()
+            assert cmd == 'shakehands'
+            job_ipc.send('shakehands', job_id)
+            cmd, data = job_ipc.recv()
+            assert cmd == 'alloc'
+            gpu_list = self._allocator.alloca(job_id, int(data))
             if len(gpu_list) == 0:
-                job_ipc.send('alloc', [])
-                job_ipc.close()  # TODO: adjust other jobs to accumulate / adjust epb standard
+                # TODO: adjust other jobs to accumulate / adjust epb standard
+                job_ipc.close()  
             else:
                 job_ipc.send('alloc', gpu_list)
                 job_monitor_thread = threading.Thread(target=self.monitor_job, args=(job_id, job_ipc,))
@@ -54,16 +65,19 @@ class Scheduler:
                 result = self._allocator.alloca(job_id, int(data))
                 with self._lock:
                     if len(result) < int(data): # Lack of resources
-                        self._job_cards[job_id].shortage += 1
+                        self._job_cards[job_id].scarcity += 1
+                        self._job_cards[job_id].surplus = 0
                     else:
-                        self._job_cards[job_id].shortage = 0
+                        self._job_cards[job_id].scarcity = 0
+                        self._job_cards[job_id].surplus = 0
                     self._job_cards[job_id].gpu_num = len(result)    
                 job_ipc.send('alloc', result)
             elif cmd == 'free':
                 result = self._allocator.alloca(job_id, int(data))
                 assert len(result) == int(data)
                 with self._lock:
-                    self._job_cards[job_id].shortage = 0
+                    self._job_cards[job_id].scarcity = 0
+                    self._job_cards[job_id].surplus += 1
                     self._job_cards[job_id].gpu_num = int(data)
                 job_ipc.send('free', result)
             elif cmd == 'end':
@@ -75,12 +89,13 @@ class Scheduler:
             elif cmd == 'standard':
                 standard = 1.0
                 with self._lock:
-                    standard = self._epb_standard_rate
+                    standard = self._epb_standard
                     self._job_cards[job_id].adjust_standard = True
                 job_ipc.send('standard', standard)
             elif cmd == 'ideal':
                 with self._lock:
-                    self._job_cards[job_id].shortage = 0
+                    self._job_cards[job_id].scarcity = 0
+                    self._job_cards[job_id].surplus = 0
 
     def alloc_id(self) -> int:
         with self._lock:
@@ -91,21 +106,24 @@ class Scheduler:
     def adjust_standard(self):
         while True:
             with self._lock:
-                busy = 0
+                scarcity = 0
+                surplus = 0
                 already_adjust = 0
                 for job_card in self._job_cards.values():
-                    if job_card.shortage >= 2:
-                        busy += 1
+                    if job_card.scarcity >= 2:
+                        scarcity += 1
+                    if job_card.surplus >= 2:
+                        surplus += 1
                     if job_card.adjust_standard:
                         already_adjust += 1
-                if already_adjust >= len(self._job_cards) / 2: # Adjustment of epb-standard has been responded
-                    if busy >= len(self._job_cards) / 2: 
+                if already_adjust > len(self._job_cards) / 2: # Adjustment of epb-standard has been responded
+                    if scarcity > len(self._job_cards) / 2: 
                         for job_card in self._job_cards.values():
                             job_card.adjust_standard = False
-                        self._epb_standard_rate = min(1.0, self._epb_standard_rate / 0.9)    
-                    elif busy == 0: 
+                        self._epb_standard = min(self._epb_standard_upper, self._epb_standard / self._epb_standard_adjust_rate) 
+                    elif surplus > len(self._job_cards) / 2: 
                         for job_card in self._job_cards.values():
                             job_card.adjust_standard = False
-                        self._epb_standard_rate *= 0.9
+                        self._epb_standard = max(self._epb_standard_lower, self._epb_standard * self._epb_standard_adjust_rate)    
             time.sleep(10)
                 

@@ -222,8 +222,8 @@ class _FaaSAdjuster:
         self.last_epb = torch.tensor(0.0)
         self.now_step = 0
         self.now_trigger = 0
-        self.bs_upper = 50
-        self.bs_lower = 20
+        self.bs_upper = 200
+        self.bs_lower = 100
         self.now_lower_bound = 2.0
         self.now_upper_bound = 4.0
 

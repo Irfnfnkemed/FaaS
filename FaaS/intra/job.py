@@ -34,8 +34,14 @@ class IntraOptim:
         self._adjuster.associate(self._status, self._optimizer, self._grad_monitor)
         self._grad_monitor.associate(self._model, self._status)
         self.trainloader.associate(self._status)
+        self.job_id = torch.tensor(0).to(local_rank())
         if rank() == 0:
             self._ipc.connect(proxy_ip, proxy_port)
+            self._ipc.send('shakehands', '')
+            cmd, job_id = self._ipc.recv()
+            assert cmd == 'shakehands'
+            self.job_id = torch.tensor(int(job_id)).to(local_rank())
+        dist.broadcast(self.job_id, src=0)
         self.load_checkpoint()
 
     def save_checkpoint(self):
@@ -46,12 +52,12 @@ class IntraOptim:
             'epochs_now': self._epochs_now,
             'global_bs': self._global_bs
         }
-        torch.save(checkpoint, './checkpoint.pth')
+        torch.save(checkpoint, f'./tmp_{self.job_id.item()}/checkpoint.pth')
 
     def load_checkpoint(self):
-        if os.path.exists('./checkpoint.pth'):
+        if os.path.exists(f'./tmp_{self.job_id.item()}/checkpoint.pth'):
             print("Loading from checkpoint")
-            checkpoint = torch.load('./checkpoint.pth')
+            checkpoint = torch.load(f'./tmp_{self.job_id.item()}/checkpoint.pth')
             self._epochs_now = checkpoint['epochs_now']
             self._model.module.load_state_dict(checkpoint['model'])
             self._optimizer.load_state_dict(checkpoint['optimizer'])
@@ -125,15 +131,20 @@ class IntraOptim:
                     return
             else: # Free resource  
                 new_world_size = math.ceil(self._global_bs * 2 / (self._adjuster.bs_upper + self._adjuster.bs_lower))      
-                if rank() == 0: # Free rebudang resources
-                    self._ipc.send('free', new_world_size)
+                if new_world_size == world_size():
+                    self.trainloader.set_batch_size(int(self._global_bs / world_size()))
                     self._adjuster.adjust_accumulate_step(self._status.accumulation_steps, 1)
                     self._status.accumulation_steps = 1
-                    self._status.set_adapt_lr()
-                    self.save_checkpoint()
-                dist.barrier()  # Ensure exiting after checkpoint was saved
-                self.exit()
-                return
+                else:
+                    if rank() == 0: # Free rebudang resources
+                        self._ipc.send('free', new_world_size)
+                        self._adjuster.adjust_accumulate_step(self._status.accumulation_steps, 1)
+                        self._status.accumulation_steps = 1
+                        self._status.set_adapt_lr()
+                        self.save_checkpoint()
+                    dist.barrier()  # Ensure exiting after checkpoint was saved
+                    self.exit()
+                    return
             self._status.set_adapt_lr()
             self._adjuster.clear()
             self._grad_monitor.clear()
